@@ -439,6 +439,7 @@ def pad_vocab(tensor, multiple=128, value=0):
     friendlier multiple, e.g. 50,304 if multiple=128 when we
     export the weights into C land. This is a NOOP algorithmically
     and is only done to make the tensor operations more efficient.
+    填充vocab，让其变为2的倍数
     """
     assert tensor.ndim == 2
     V, C = tensor.shape
@@ -454,23 +455,24 @@ def pad_vocab(tensor, multiple=128, value=0):
 def write_model(model, filename, dtype):
     # everything we need to instantiate the model
     # 1) header is: version int, GPTConfig ints, padding to 1024 bytes
+    # 保存模型形状等信息
     assert dtype in {"float32", "bfloat16"} # float16 todo maybe later
     version = {
         "float32": 3, # 3: all tensors are fp32, padded vocab
         "bfloat16": 5, # 5: all tensors are bf16, padded vocab
     }[dtype]
-    header = torch.zeros(256, dtype=torch.int32)
+    header = torch.zeros(256, dtype=torch.int32) #初始化头数组
     header[0] = 20240326 # magic
     header[1] = version # checkpoint version
-    header[2] = model.config.block_size
-    header[3] = model.config.vocab_size
-    header[4] = model.config.n_layer
-    header[5] = model.config.n_head
-    header[6] = model.config.n_embd
+    header[2] = model.config.block_size # 最大输入token数
+    header[3] = model.config.vocab_size # 词表大小
+    header[4] = model.config.n_layer # 层数
+    header[5] = model.config.n_head # 注意力头数
+    header[6] = model.config.n_embd # 嵌入维度
     # 2) the parameters follow the header
     params = {name: param.cpu() for name, param in model.named_parameters()}
-    # pad the vocab to a multiple of 128 here at export, for efficiency in C
-    wte = params["transformer.wte.weight"] # (V, C)
+    # pad the vocab to a multiple of 128 here at export, for efficiency in C 把wte填充
+    wte = params["transformer.wte.weight"] # (V, C) 
     wte_padded = pad_vocab(wte) # (Vp, C)
     params["transformer.wte.weight"] = wte_padded # (Vp, C)
     print(f"padded vocab size from {wte.size(0)} to {wte_padded.size(0)}")
@@ -532,7 +534,7 @@ def write_tokenizer(enc, filename):
 # int main
 
 def print0(*args, **kwargs):
-    # modified print that only prints from the master process
+    # modified print that only prints from the master process 只打印主进程的信息
     # if this is not a distributed run, it's just a print
     if int(os.environ.get("RANK", 0)) == 0:
         print(*args, **kwargs)
