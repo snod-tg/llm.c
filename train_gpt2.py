@@ -36,7 +36,7 @@ import torch.distributed as dist
 
 # -----------------------------------------------------------------------------
 # PyTorch nn.Module definitions for the GPT-2 model
-
+# 激活函数
 class NewGELU(nn.Module):
     """Careful there are a few versions of GeLU, this one is the exact one used by OpenAI"""
     def forward(self, input):
@@ -45,15 +45,16 @@ class NewGELU(nn.Module):
 # using a global to toggle flash-attention
 FLASH = 0
 
+# 因果自注意力模块
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        assert config.n_embd % config.n_head == 0
+        assert config.n_embd % config.n_head == 0                                                                           # 确保嵌入维度可以被多头整除
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)                                                           # 把kqv一块计算
         # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)                                                               # 把attn结果投影
         self.c_proj.LLMC_RESIDUAL_SCALE_FLAG = 1
         # regularization
         self.n_head = config.n_head
@@ -63,55 +64,55 @@ class CausalSelfAttention(nn.Module):
                                      .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)                                  # (B, T, C)
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        qkv = self.c_attn(x)
-        q, k, v = qkv.split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        qkv = self.c_attn(x)                                                                                                 # （(B, T, C) @ (C, 3C) -> (B, T, 3C)
+        q, k, v = qkv.split(self.n_embd, dim=2)                                                                              #  沿着第2维分割，step为C （B， T， C） (B, T, C) (B, T, C)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)                                     #  (B, T, C/h, h)  -> (B, C/h, T, h)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)                                     #  (B, T, C/h, h)  -> (B, C/h, T, h)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)                                     #  (B, T, C/h, h)  -> (B, C/h, T, h)
         if FLASH:
             # flashattention
             y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         else:
             # manual implementation of attention
             # this materializes the large (T,T) matrix for all the queries and keys
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-            att = F.softmax(att, dim=-1)
-            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))                                                 # (B, C/h, T, h) @ (B, C/h, h, T) = (B, C/h, T, T) / 缩放
+            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))                                                 # 掩码
+            att = F.softmax(att, dim=-1)                                                                                    # 求概率，沿最后一维
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)                                                  # (B, C/h, T, T) @ (B, C/h, T, h) -> (B, C/h, T, h)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side                        # 复原 (B, C/h, T, h) -> (B, T, C/h, h) -> (B, T, C)
         # output projection
-        y = self.c_proj(y)
+        y = self.c_proj(y)                                                                                                  # 投影 (B, T, C) @ (C, C) -> (B, T, C)
         return y
 
 class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.gelu    = NewGELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)                                                          # 升维
+        self.gelu    = NewGELU()                                                                                            # 激活函数
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)                                                          # 降维
         self.c_proj.LLMC_RESIDUAL_SCALE_FLAG = 1
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.gelu(x)
-        x = self.c_proj(x)
+        x = self.c_fc(x)                                                                                                    # (B, T, C) @ (C, 4C) -> (B, T, 4C)
+        x = self.gelu(x)                                                                                                    # 激活函数
+        x = self.c_proj(x)                                                                                                  # (B， T， 4C) @ (4C, C) -> (B, T, C)
         return x
 
 class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MLP(config)
+        self.ln_1 = nn.LayerNorm(config.n_embd)                                                                             # 层归一化
+        self.attn = CausalSelfAttention(config)                                                                             # 因果注意力
+        self.ln_2 = nn.LayerNorm(config.n_embd)                                                                             # 层归一化
+        self.mlp = MLP(config)                                                                                              # FFN
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        x = x + self.attn(self.ln_1(x))                                                                                     # Pre Norm
+        x = x + self.mlp(self.ln_2(x))                                                                                      # Pre Norm
         return x
 
 # -----------------------------------------------------------------------------
@@ -119,7 +120,7 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
+    block_size: int = 1024                                                                                                  # 位置编码数量，这里固定为1024，最长输入1024个token
     vocab_size: int = 50257
     n_layer: int = 12
     n_head: int = 12
@@ -132,14 +133,14 @@ class GPT(nn.Module):
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
+            wte = nn.Embedding(config.vocab_size, config.n_embd),                                                           # (V, C)
+            wpe = nn.Embedding(config.block_size, config.n_embd),                                                           # (b, C)
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)                                              # (C, V)
         self.lm_head.LLMC_SKIP_INIT = 1 # don't init this one, we will tie weights
-        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying                  # 输入嵌入矩阵和输出投影矩阵共享相同的参数
 
         # init all weights, use a torch rng object to be very careful
         self.init_rng = torch.Generator()
@@ -147,6 +148,7 @@ class GPT(nn.Module):
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
+        # 权重初始化 普通线性层（std=0.02），残差投影层（std=0.02/math.sqrt(2 * self.config.n_layer)），2是每层2个残差
         if isinstance(module, nn.Linear):
             # apply special scaled init to the residual projections, per GPT-2 paper
             std = 0.02 if not hasattr(module, 'LLMC_RESIDUAL_SCALE_FLAG') else 0.02/math.sqrt(2 * self.config.n_layer)
@@ -161,26 +163,26 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None, return_logits=True):
         device = idx.device
-        b, t = idx.size()
+        b, t = idx.size()                                                                                                   # (B, T)
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)                                               # (T)
 
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = tok_emb + pos_emb
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)                                      # (B, T) embed (V, C) 从V中取T个C -> (B, T, C)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)                                      # (T) embed (b, C) 从b中取T个C -> (T, C)
+        x = tok_emb + pos_emb                                                                                               # (B, T, C) + (T, C) -> (B, T, C)
 
         for block in self.transformer.h:
-            x = block(x)
-        x = self.transformer.ln_f(x)
+            x = block(x)                                                                                                    # (B, T, C) -> (B, T, C)
+        x = self.transformer.ln_f(x)                                                                                        # (B, T, C) -> (B, T, C)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            logits = self.lm_head(x)                                                                                        # 输出 (B, T, C) @ (C, V) -> (B, T, V)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)                     # target(B, Ta) ,Ta = T[1:] + next token ，shape is same. # logits.size(-1) = V , logits (B, T, V) -> (B*T, V)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim                           # (B, [-1], C) @ (C, V) -> (B, [-1], V)
             loss = None
 
         # there are performance reasons why not returning logits is prudent, if not needed
@@ -239,27 +241,27 @@ class GPT(nn.Module):
         return model
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, zero_stage):
-        # start with all of the candidate parameters
+        # start with all of the candidate parameters 获取所有候选参数
         param_dict = {pn: p for pn, p in self.named_parameters()}
-        # filter out those that do not require grad
+        # filter out those that do not require grad 过滤不需要梯度的参数
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
         # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't. 分流参数，2维参数要权重衰减，1维不要
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
-        num_decay_params = sum(p.numel() for p in decay_params)
+        num_decay_params = sum(p.numel() for p in decay_params) # 统计参数数量
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         print0(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
         print0(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
+        # Create AdamW optimizer and use the fused version if it is available 创建AdamW优化器，并使用融和版本（如果有）
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
         print0(f"using fused AdamW: {use_fused}")
-        if zero_stage == 1:
+        if zero_stage == 1: # 这是用于数据并行训练中， 1 表示将优化器状态切分
             print0("using ZeroRedundancyOptimizer")
             optimizer = ZeroRedundancyOptimizer(**optim_groups[0], optimizer_class=torch.optim.AdamW,
                                                 lr=learning_rate, betas=betas, fused=use_fused)
@@ -275,29 +277,31 @@ class GPT(nn.Module):
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        接收一个作为条件的索引序列 idx（形状为 (b, t) 的长整型张量），然后补全该序列，补全长度为 max_new_tokens 个 token。
+        每次生成一个 token 后，都将预测结果作为输入反馈回模型，以便生成下一个 token。使用此方法前，你很可能需要确保模型处于 model.eval() 模式。
         """
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
+            # if the sequence context is growing too long we must crop it at block_size 如果序列内容太长，我们必须把它切为 block size长度
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-            # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            # forward the model to get the logits for the index in the sequence 模型向前推理，获得下一个输出的index
+            logits, _ = self(idx_cond)  # 输出是预测结果和 (B, T, V)
             # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
+            logits = logits[:, -1, :] / temperature  # (B, T, V) -> (B, 1, V), 其中V为词表数，，每个值代表对应token的概率， 用temperature缩放可以增大高分词概率或减少
             # optionally crop the logits to only the top k options
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            if top_k is not None:  # 选择top k 个候选
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1))) 
                 logits[logits < v[:, [-1]]] = -float('Inf')
             # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
             # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1)
+            idx_next = torch.multinomial(probs, num_samples=1) # 这里是随机选择
             # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
+            idx = torch.cat((idx, idx_next), dim=1) # 拼接到下一轮的输入
 
         return idx
 
 # -----------------------------------------------------------------------------
-# Our own simple Distributed Data Loader
+# Our own simple Distributed Data Loader 分布式数据加载(暂时不看）)
 
 def _peek_data_shard(filename):
     # only reads the header, returns header data
@@ -379,11 +383,12 @@ class DistributedDataLoader:
 
 # -----------------------------------------------------------------------------
 # Python -> C bridge utilities for saving params/grads/activations to .bin files
+# 把python参数保存为C可以读取的bin文件
 
 def write_fp32(tensor, file):
-    t = tensor.detach().cpu().to(torch.float32)
-    b = t.numpy().tobytes()
-    file.write(b)
+    t = tensor.detach().cpu().to(torch.float32)  # 切断与计算图的关联，搬运到CPU上，转换为fp32
+    b = t.numpy().tobytes() # 转换为numpy数组，转换为字节
+    file.write(b) # 写入文件
 
 def write_bf16(tensor, file):
     t = tensor.detach().cpu().to(torch.bfloat16)
@@ -398,32 +403,32 @@ def write_tensors(model_tensors, L, file, dtype):
     write_fun = write_fp32 if dtype == "float32" else write_bf16
     write_fun(model_tensors["transformer.wte.weight"], file) # (V, C)
     write_fun(model_tensors["transformer.wpe.weight"], file) # (T, C)
-    for i in range(L): # (L, C)
+    for i in range(L): # (L, C) 写入归一层权重 L = C * layer_num
         write_fun(model_tensors[f"transformer.h.{i}.ln_1.weight"], file)
-    for i in range(L): # (L, C)
+    for i in range(L): # (L, C) 写入归一层偏置
         write_fun(model_tensors[f"transformer.h.{i}.ln_1.bias"], file)
-    for i in range(L): # (L, 3C, C)
+    for i in range(L): # (L, 3C, C) 写入kqv权重
         write_fun(model_tensors[f"transformer.h.{i}.attn.c_attn.weight"], file)
-    for i in range(L): # (L, 3C)
+    for i in range(L): # (L, 3C) 写入kqv偏置
         write_fun(model_tensors[f"transformer.h.{i}.attn.c_attn.bias"], file)
-    for i in range(L): # (L, C, C)
+    for i in range(L): # (L, C, C) 写入投影层权重
         write_fun(model_tensors[f"transformer.h.{i}.attn.c_proj.weight"], file)
-    for i in range(L): # (L, C)
+    for i in range(L): # (L, C) 写入投影层偏置
         write_fun(model_tensors[f"transformer.h.{i}.attn.c_proj.bias"], file)
-    for i in range(L): # (L, C)
+    for i in range(L): # (L, C) 写入归一层权重2
         write_fun(model_tensors[f"transformer.h.{i}.ln_2.weight"], file)
-    for i in range(L): # (L, C)
+    for i in range(L): # (L, C) 写入归一层偏置2
         write_fun(model_tensors[f"transformer.h.{i}.ln_2.bias"], file)
-    for i in range(L): # (L, 4C, C)
+    for i in range(L): # (L, 4C, C) 写入FFN1权重
         write_fun(model_tensors[f"transformer.h.{i}.mlp.c_fc.weight"], file)
-    for i in range(L): # (L, 4C)
+    for i in range(L): # (L, 4C) 写入FFN1权重
         write_fun(model_tensors[f"transformer.h.{i}.mlp.c_fc.bias"], file)
-    for i in range(L): # (L, C, 4C)
+    for i in range(L): # (L, C, 4C) 写入FFN2权重
         write_fun(model_tensors[f"transformer.h.{i}.mlp.c_proj.weight"], file)
-    for i in range(L): # (L, C)
+    for i in range(L): # (L, C) 写入FFN2偏置
         write_fun(model_tensors[f"transformer.h.{i}.mlp.c_proj.bias"], file)
-    write_fun(model_tensors["transformer.ln_f.weight"], file) # (C, )
-    write_fun(model_tensors["transformer.ln_f.bias"], file) # (C, )
+    write_fun(model_tensors["transformer.ln_f.weight"], file) # (C, ) 写入归一层权重
+    write_fun(model_tensors["transformer.ln_f.bias"], file) # (C, ) 写入归一层偏置
 
 @torch.no_grad()
 def pad_vocab(tensor, multiple=128, value=0):
