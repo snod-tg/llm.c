@@ -36,15 +36,17 @@ import torch.distributed as dist
 
 # -----------------------------------------------------------------------------
 # PyTorch nn.Module definitions for the GPT-2 model
-
+# 激活函数
 class NewGELU(nn.Module):
     """Careful there are a few versions of GeLU, this one is the exact one used by OpenAI"""
     def forward(self, input):
         return 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))))
 
 # using a global to toggle flash-attention
+# 使用一个全局变量切换flash attention
 FLASH = 0
 
+# 因果注意力
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):

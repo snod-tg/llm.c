@@ -31,6 +31,10 @@ There will be other versions of this code that specialize it and make it fast.
 // ----------------------------------------------------------------------------
 // all the individual layers' forward and backward passes
 // B = batch_size, T = sequence_length, C = channels, V = vocab_size
+//    # forward the GPT model itself
+//     tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+//     pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+//     x = tok_emb + pos_emb
 
 void encoder_forward(float* out,
                    int* inp, float* wte, float* wpe,
@@ -39,12 +43,19 @@ void encoder_forward(float* out,
     // inp is (B,T) of integers, holding the token ids at each (b,t) position
     // wte is (V,C) of token embeddings, short for "weight token embeddings"
     // wpe is (maxT,C) of position embeddings, short for "weight positional embedding"
-    for (int b = 0; b < B; b++) {
-        for (int t = 0; t < T; t++) {
+    // 每个batch块，举例第0块batch， b = 0
+    // 每个序列的字符，举例第0块batch的 t = 0的token
+    // out_bt 对应的输出的坐标：out首地址 + b * T（标准序度）* C（C的长度表示对应tokenizer中的表示坐标维度）+ t * C；
+    // ix 是对应token在inp（输入）的下标
+    // wte 是 wte首地址 + ix * C；
+    // wpe_t 是wpe首地址 + t * C；使用t是因为只要知道该token在这段序列中的位置关系。
+    // 最后输出是对应x = tok_emb + pos_emb
+    for (int b = 0; b < B; b++) {                                                   
+        for (int t = 0; t < T; t++) {                                               
             // seek to the output position in out[b,t,:]
-            float* out_bt = out + b * T * C + t * C;
+            float* out_bt = out + b * T * C + t * C;                                                                                  
             // get the index of the token at inp[b, t]
-            int ix = inp[b * T + t];
+            int ix = inp[b * T + t];                                                
             // seek to the position in wte corresponding to the token
             float* wte_ix = wte + ix * C;
             // seek to the position in wpe corresponding to the position
@@ -75,6 +86,7 @@ void encoder_backward(float* dwte, float* dwpe,
     }
 }
 
+// 层归一化 向前传播
 void layernorm_forward(float* out, float* mean, float* rstd,
                        float* inp, float* weight, float* bias,
                        int B, int T, int C) {
@@ -83,6 +95,14 @@ void layernorm_forward(float* out, float* mean, float* rstd,
     // mean and rstd are (B,T) buffers, to be used later in backward pass
     // at each position (b,t) of the input, the C-dimensional vector
     // of activations gets normalized, then scaled and shifted
+    // 在特征维度 (feature dimension) 上进行归一化。它对每一个独立的样本计算均值和方差
+    // 两个for循环取每一个token
+    // 先计算平均值
+    // 计算方差 求标准差
+    // 计算输出位置坐标
+    // 计算归一化
+    // 缓存平均值和标准差
+    // 函数输出保存在第一个out指针指向的位置
     float eps = 1e-5f;
     for (int b = 0; b < B; b++) {
         for (int t = 0; t < T; t++) {
@@ -160,6 +180,9 @@ void layernorm_backward(float* dinp, float* dweight, float* dbias,
     }
 }
 
+// GEMM 通用矩阵乘法
+// 朴素 矩阵乘法 向前
+// OC 为 output C
 void matmul_forward_naive(float* out,
                          const float* inp, const float* weight, const float* bias,
                          int B, int T, int C, int OC) {
@@ -181,6 +204,8 @@ void matmul_forward_naive(float* out,
     }
 }
 
+// GEMM 通用矩阵乘法
+// 
 void matmul_forward(float* out,
                     const float* inp, const float* weight, const float* bias,
                     int B, int T, int C, int OC) {
@@ -200,6 +225,7 @@ void matmul_forward(float* out,
 
     // collapse the B and T loops into one and turn it into a strided loop.
     // then we can tile the inner loop, and reuse the loaded weight LOOP_UNROLL many times
+    // 平铺的版本
     #pragma omp parallel for
     for (int obt = 0; obt < B * T; obt += LOOP_UNROLL) {
         for (int o = 0; o < OC; o++) {
@@ -268,6 +294,7 @@ void matmul_backward(float* dinp, float* dweight, float* dbias,
     }
 }
 
+// 注意力机制 向前
 void attention_forward(float* out, float* preatt, float* att,
                        float* inp,
                        int B, int T, int C, int NH) {
@@ -278,6 +305,13 @@ void attention_forward(float* out, float* preatt, float* att,
     // attention is the only layer that mixes information across time
     // every other operation is applied at every (b,t) position independently
     // (and of course, no layer mixes information across batch)
+    // 输入为 (B, T, 3C)，其中存放的是查询（Q）、键（K）、值（V）向量
+    // preatt 和 att 的形状为 (B, NH, T, T)，其中 NH 为注意力头数，T 为序列长度
+    // 它们分别保存前注意力分数和后注意力分数（用于反向传播）
+    // 输出为 (B, T, C)
+    // 注意力层是唯一在时间维度上混合信息的层
+    // 其他所有操作都是在每个 (b, t) 位置上独立进行的
+    // （当然，没有任何一层会在 batch 维度上混合信息）
     int C3 = C*3;
     int hs = C / NH; // head size
     float scale = 1.0 / sqrtf(hs);
@@ -285,6 +319,7 @@ void attention_forward(float* out, float* preatt, float* att,
     #pragma omp parallel for collapse(3)
     for (int b = 0; b < B; b++) {
         for (int t = 0; t < T; t++) {
+            // 遍历每个注意力头
             for (int h = 0; h < NH; h++) {
                 float* query_t = inp + b * T * C3 + t * C3 + h * hs;
                 float* preatt_bth = preatt + b*NH*T*T + h*T*T + t*T;
@@ -404,6 +439,8 @@ void attention_backward(float* dinp, float* dpreatt, float* datt,
     }
 }
 
+// 对输入张量中的所有元素（即特征维度上的每个神经元）逐点应用近似 GeLU 非线性激活
+// 输入形状通常为 (B, T, C)，N = B * T * C，该操作不改变形状
 #define GELU_SCALING_FACTOR sqrtf(2.0f / M_PI)
 void gelu_forward(float* out, float* inp, int N) {
     // (approximate) GeLU elementwise non-linearity in the MLP block of Transformer
@@ -483,6 +520,7 @@ void softmax_forward(float* probs, float* logits, int B, int T, int V, int Vp) {
     }
 }
 
+// 交叉熵 向前
 void crossentropy_forward(float* losses,
                           float* probs, int* targets,
                           int B, int T, int Vp) {
@@ -499,6 +537,7 @@ void crossentropy_forward(float* losses,
     }
 }
 
+// 交叉熵-softmax 向后传播 
 void crossentropy_softmax_backward(float* dlogits,
                            float* dlosses, float* probs, int* targets,
                            int B, int T, int V, int Vp) {
@@ -704,9 +743,11 @@ typedef struct {
     float mean_loss; // after a forward pass with targets, will be populated with the mean loss
 } GPT2;
 
+// 加载模型参数函数
 void gpt2_build_from_checkpoint(GPT2 *model, const char* checkpoint_path) {
 
     // read in model from a checkpoint file
+    // 参考train_gpt2.py保存模型的片段
     FILE *model_file = fopenCheck(checkpoint_path, "rb");
     int model_header[256];
     freadCheck(model_header, sizeof(int), 256, model_file);
@@ -762,6 +803,7 @@ void gpt2_build_from_checkpoint(GPT2 *model, const char* checkpoint_path) {
     model->mean_loss = -1.0f; // -1.0f will designate no loss
 }
 
+// 向前传播
 void gpt2_forward(GPT2 *model, int* inputs, int* targets, size_t B, size_t T) {
     // targets are optional and could be NULL
 
@@ -828,53 +870,53 @@ void gpt2_forward(GPT2 *model, int* inputs, int* targets, size_t B, size_t T) {
         residual = l == 0 ? acts.encoded : acts.residual3 + (l-1) * B * T * C;
 
         // get the pointers of the weights for this layer
-        float* l_ln1w = params.ln1w + l * C;
-        float* l_ln1b = params.ln1b + l * C;
-        float* l_qkvw = params.qkvw + l * 3*C * C;
-        float* l_qkvb = params.qkvb + l * 3*C;
-        float* l_attprojw = params.attprojw + l * C * C;
-        float* l_attprojb = params.attprojb + l * C;
-        float* l_ln2w = params.ln2w + l * C;
-        float* l_ln2b = params.ln2b + l * C;
-        float* l_fcw = params.fcw + l * 4*C * C;
-        float* l_fcb = params.fcb + l * 4*C;
-        float* l_fcprojw = params.fcprojw + l * C * 4*C;
-        float* l_fcprojb = params.fcprojb + l * C;
+        float* l_ln1w = params.ln1w + l * C;                    // norm1 weight （1，C）
+        float* l_ln1b = params.ln1b + l * C;                    // norm1 bias   （1，C）
+        float* l_qkvw = params.qkvw + l * 3*C * C;              // qkv weight 每个 （3C，C）
+        float* l_qkvb = params.qkvb + l * 3*C;                  // qkv bias       （3，C）
+        float* l_attprojw = params.attprojw + l * C * C;        // output1 weight  （C，C）
+        float* l_attprojb = params.attprojb + l * C;            // output1 bias    （1，C）
+        float* l_ln2w = params.ln2w + l * C;                    // norm2 weight    （1，C）   
+        float* l_ln2b = params.ln2b + l * C;                    // norm2 bias      （1，C）
+        float* l_fcw = params.fcw + l * 4*C * C;                // 线性变化 先升维，再降维 FNN weight （C，4C）
+        float* l_fcb = params.fcb + l * 4*C;                    // FNN bias   （1，4C）                      
+        float* l_fcprojw = params.fcprojw + l * C * 4*C;        // FNN weight （4C，C）
+        float* l_fcprojb = params.fcprojb + l * C;              // FNN bias    (1, C)
 
         // get the pointers of the activations for this layer
-        float* l_ln1 = acts.ln1 + l * B * T * C;
-        float* l_ln1_mean = acts.ln1_mean + l * B * T;
-        float* l_ln1_rstd = acts.ln1_rstd + l * B * T;
-        float* l_qkv = acts.qkv + l * B * T * 3*C;
-        float* l_atty = acts.atty + l * B * T * C;
-        float* l_preatt = acts.preatt + l * B * NH * T * T;
-        float* l_att = acts.att + l * B * NH * T * T;
-        float* l_attproj = acts.attproj + l * B * T * C;
-        float* l_residual2 = acts.residual2 + l * B * T * C;
-        float* l_ln2 = acts.ln2 + l * B * T * C;
-        float* l_ln2_mean = acts.ln2_mean + l * B * T;
-        float* l_ln2_rstd = acts.ln2_rstd + l * B * T;
-        float* l_fch = acts.fch + l * B * T * 4*C;
-        float* l_fch_gelu = acts.fch_gelu + l * B * T * 4*C;
-        float* l_fcproj = acts.fcproj + l * B * T * C;
-        float* l_residual3 = acts.residual3 + l * B * T * C;
+        float* l_ln1 = acts.ln1 + l * B * T * C;                // 归一化 输出
+        float* l_ln1_mean = acts.ln1_mean + l * B * T;          // 归一化 均值
+        float* l_ln1_rstd = acts.ln1_rstd + l * B * T;          // 归一化 标准差
+        float* l_qkv = acts.qkv + l * B * T * 3*C;              // kqv线性映射输出
+        float* l_atty = acts.atty + l * B * T * C;              // attn 输出
+        float* l_preatt = acts.preatt + l * B * NH * T * T;     // 保存上一个attn
+        float* l_att = acts.att + l * B * NH * T * T;           // 当前attn
+        float* l_attproj = acts.attproj + l * B * T * C;        // attn后的线性变换输出
+        float* l_residual2 = acts.residual2 + l * B * T * C;    // 残差输出
+        float* l_ln2 = acts.ln2 + l * B * T * C;                // 归一化输出
+        float* l_ln2_mean = acts.ln2_mean + l * B * T;          // 归一化 均值
+        float* l_ln2_rstd = acts.ln2_rstd + l * B * T;          // 归一化 标准差
+        float* l_fch = acts.fch + l * B * T * 4*C;              // 线性升维 输出
+        float* l_fch_gelu = acts.fch_gelu + l * B * T * 4*C;    // 激活函数输出
+        float* l_fcproj = acts.fcproj + l * B * T * C;          // 线性降维输出
+        float* l_residual3 = acts.residual3 + l * B * T * C;    // 残差连接输出
 
         // now do the forward pass
-        layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);
-        matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);
-        attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
-        matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);
-        residual_forward(l_residual2, residual, l_attproj, B*T*C);
-        layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C);
-        matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);
-        gelu_forward(l_fch_gelu, l_fch, B*T*4*C);
-        matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);
-        residual_forward(l_residual3, l_residual2, l_fcproj, B*T*C);
+        layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C);    // 层归一化
+        matmul_forward(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, 3*C);                             // kqv 线性映射
+        attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);                         // 多头注意力
+        matmul_forward(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C);                  // 注意力结果线性映射
+        residual_forward(l_residual2, residual, l_attproj, B*T*C);                              // 残差连接
+        layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C); // 层归一化
+        matmul_forward(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, 4*C);                               // 线性升维
+        gelu_forward(l_fch_gelu, l_fch, B*T*4*C);                                               // 激活函数
+        matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, 4*C, C);               // 线性降维
+        residual_forward(l_residual3, l_residual2, l_fcproj, B*T*C);                            // 残差连接
     }
     residual = acts.residual3 + (L-1) * B * T * C; // last residual is in residual3
-    layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params.lnfw, params.lnfb, B, T, C);
-    matmul_forward(acts.logits, acts.lnf, params.wte, NULL, B, T, C, Vp);
-    softmax_forward(acts.probs, acts.logits, B, T, V, Vp);
+    layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params.lnfw, params.lnfb, B, T, C);  // 层归一化，避免溢出和饱和
+    matmul_forward(acts.logits, acts.lnf, params.wte, NULL, B, T, C, Vp); // 映射对应token
+    softmax_forward(acts.probs, acts.logits, B, T, V, Vp);  // softmax
 
     // also forward the cross-entropy loss function if we have the targets
     if (targets != NULL) {
@@ -890,6 +932,7 @@ void gpt2_forward(GPT2 *model, int* inputs, int* targets, size_t B, size_t T) {
     }
 }
 
+// 把参数和激活参数对应梯度置零
 void gpt2_zero_grad(GPT2 *model) {
     if(model->grads_memory != NULL) { memset(model->grads_memory, 0, model->num_parameters * sizeof(float)); }
     if(model->grads_acts_memory != NULL) { memset(model->grads_acts_memory, 0, model->num_activations * sizeof(float)); }
@@ -898,12 +941,14 @@ void gpt2_zero_grad(GPT2 *model) {
 void gpt2_backward(GPT2 *model) {
 
     // double check we forwarded previously, with targets
+    // 检查是否执行了向前传播，执行了继续，否则退出
     if (model->mean_loss == -1.0f) {
         printf("Error: must forward with targets before backward\n");
         exit(1);
     }
 
     // lazily allocate the memory for gradients of the weights and activations, if needed
+    // 懒分配参数梯度内存和激活参数梯度内存，并默认置零
     if (model->grads_memory == NULL) {
         model->grads_memory = malloc_and_point_parameters(&model->grads, model->param_sizes);
         model->grads_acts_memory = malloc_and_point_activations(&model->grads_acts, model->act_sizes);
@@ -911,6 +956,7 @@ void gpt2_backward(GPT2 *model) {
     }
 
     // convenience shortcuts (and size_t to help prevent int overflow)
+    // 简化一些参数名称（简称）
     size_t B = model->batch_size;
     size_t T = model->seq_len;
     size_t V = model->config.vocab_size;
@@ -920,6 +966,7 @@ void gpt2_backward(GPT2 *model) {
     size_t C = model->config.channels;
 
     // backward pass: go in the reverse order of the forward pass, and call backward() functions
+    // 简化变量名称
     ParameterTensors params = model->params; // for brevity
     ParameterTensors grads = model->grads;
     ActivationTensors acts = model->acts;
@@ -928,9 +975,15 @@ void gpt2_backward(GPT2 *model) {
     // we kick off the chain rule by filling in dlosses with 1.0f/(B*T)
     // technically this is a small, inline backward() pass of calculating
     // total, final loss as the mean over all losses over all (B,T) positions in the batch
+    // 我们通过将 dlosses 初始化为 1.0f/(B*T) 来启动链式法则（反向传播的起点）
+    // 严格来说，这是一个微型的、内联的反向传播（backward）计算过程，
+    // 其目的是计算批次中所有 (B, T) 位置上的平均损失，作为最终的总损失标量
+    // 将 1/N 填入最后一层（损失层）的输出梯度
     float dloss_mean = 1.0f / (B*T);
     for (int i = 0; i < B*T; i++) { grads_acts.losses[i] = dloss_mean; }
 
+
+    // 按照forward相反顺序反向传播
     crossentropy_softmax_backward(grads_acts.logits, grads_acts.losses, acts.probs, model->targets, B, T, V, Vp);
     matmul_backward(grads_acts.lnf, grads.wte, NULL, grads_acts.logits, acts.lnf, params.wte, B, T, C, Vp);
     float* residual = acts.residual3 + (L-1) * B * T * C; // last layer's residual
@@ -1077,10 +1130,12 @@ int sample_mult(float* probabilities, int n, float coin) {
 int main() {
 
     // build the GPT-2 model from a checkpoint
+    // 创建模型并读取模型参数
     GPT2 model;
     gpt2_build_from_checkpoint(&model, "gpt2_124M.bin");
 
     // build the DataLoaders from tokens files. for now use tiny_shakespeare if available, else tiny_stories
+    // 加载数据集
     const char* tiny_stories_train = "dev/data/tinystories/TinyStories_train.bin";
     const char* tiny_stories_val = "dev/data/tinystories/TinyStories_val.bin";
     const char* tiny_shakespeare_train = "dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
@@ -1097,7 +1152,8 @@ int main() {
     int val_num_batches = 5;
 
     // build the Tokenizer
-    Tokenizer tokenizer;
+    // 创建Tokenizer，我看了一下，主要用于下面生成文本，应该是从token到文本的映射“字典”（表）
+    Tokenizer tokenizer;  
     tokenizer_init(&tokenizer, "gpt2_tokenizer.bin");
 
     // some memory for generating samples from the model
@@ -1106,10 +1162,12 @@ int main() {
     const int genT = 64; // number of steps of inference we will do
 
     // train
+    // 训练
     struct timespec start, end;
     for (int step = 0; step <= 40; step++) {
 
         // once in a while estimate the validation loss
+        // 验证集loss
         if (step % 10 == 0) {
             float val_loss = 0.0f;
             dataloader_reset(&val_loader);
@@ -1123,6 +1181,7 @@ int main() {
         }
 
         // once in a while do model inference to print generated text
+        // 采样生成文本
         if (step > 0 && step % 20 == 0) {
             // fill up gen_tokens with the GPT2_EOT, which kicks off the generation
             for(int i = 0; i < B * T; ++i) {
@@ -1160,18 +1219,20 @@ int main() {
         }
 
         // do a training step
-        clock_gettime(CLOCK_MONOTONIC, &start);
-        dataloader_next_batch(&train_loader);
-        gpt2_forward(&model, train_loader.inputs, train_loader.targets, B, T);
-        gpt2_zero_grad(&model);
-        gpt2_backward(&model);
-        gpt2_update(&model, 1e-4f, 0.9f, 0.999f, 1e-8f, 0.0f, step+1);
-        clock_gettime(CLOCK_MONOTONIC, &end);
+        // 正式训练
+        clock_gettime(CLOCK_MONOTONIC, &start);                                     // 记录开始时间
+        dataloader_next_batch(&train_loader);                                       // 记载下一批数据？
+        gpt2_forward(&model, train_loader.inputs, train_loader.targets, B, T);      // 向前传播
+        gpt2_zero_grad(&model);                                                     // 梯度归零
+        gpt2_backward(&model);                                                      // 向后传播
+        gpt2_update(&model, 1e-4f, 0.9f, 0.999f, 1e-8f, 0.0f, step+1);              // 更新参数
+        clock_gettime(CLOCK_MONOTONIC, &end);                                       // 记录结束时间
         double time_elapsed_s = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
         printf("step %d: train loss %f (took %f ms)\n", step, model.mean_loss, time_elapsed_s * 1000);
     }
 
     // free
+    // 释放内存资源
     dataloader_free(&train_loader);
     dataloader_free(&val_loader);
     tokenizer_free(&tokenizer);
