@@ -303,7 +303,7 @@ class GPT(nn.Module):
         return idx
 
 # -----------------------------------------------------------------------------
-# Our own simple Distributed Data Loader 分布式数据加载(暂时不看）)
+# Our own simple Distributed Data Loader 分布式数据加载
 
 def _peek_data_shard(filename):
     # only reads the header, returns header data
@@ -545,16 +545,16 @@ if __name__ == "__main__":
     import time
     import argparse
     import tiktoken
-    print0(f"Running pytorch {torch.version.__version__}")
+    print0(f"Running pytorch {torch.version.__version__}") #主进程打印 torch version
 
     # default settings will overfit a tiny batch of data
     # and save model weights and debug state to disk on the first iteration
     parser = argparse.ArgumentParser()
-    # file system input / output
-    parser.add_argument("--input_bin", type=str, default="dev/data/tinyshakespeare/tiny_shakespeare_val.bin", help="input .bin to train on")
-    parser.add_argument("--input_val_bin", type=str, default="", help="input .bin to eval validation loss on")
-    parser.add_argument("--output_dir", type=str, default="", help="output directory to which to write logs and checkpoints")
-    parser.add_argument("--model", type=str, default="gpt2", help="gpt2|gpt2-medium|gpt2-large|gpt2-xl|d12|d24|d36|d48")
+    # file system input / output 系统文件输入，输出
+    parser.add_argument("--input_bin", type=str, default="dev/data/tinyshakespeare/tiny_shakespeare_val.bin", help="input .bin to train on") # 训练数据输入bin格式
+    parser.add_argument("--input_val_bin", type=str, default="", help="input .bin to eval validation loss on") # 评估有效的loss
+    parser.add_argument("--output_dir", type=str, default="", help="output directory to which to write logs and checkpoints") # 日志和checkpoints输出地址
+    parser.add_argument("--model", type=str, default="gpt2", help="gpt2|gpt2-medium|gpt2-large|gpt2-xl|d12|d24|d36|d48") #模型选项  
     # token layout for each step of the optimization
     parser.add_argument("--batch_size", type=int, default=4, help="batch size, in units of #batch dimensions")
     parser.add_argument("--sequence_length", type=int, default=64, help="sequence length")
@@ -563,11 +563,11 @@ if __name__ == "__main__":
     parser.add_argument("--num_iterations", type=int, default=10, help="number of iterations to run")
     parser.add_argument("--inference_only", type=int, default=0, help="only run inference")
     # optimization
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="learning rate warmup iterations")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="learning rate")
     parser.add_argument("--warmup_iters", type=int, default=0, help="learning rate warmup iterations")
-    parser.add_argument("--learning_rate_decay_frac", type=float, default=1.0, help="learning rate warmup iterations")
+    parser.add_argument("--learning_rate_decay_frac", type=float, default=1.0, help="learning rate decay fraction")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay")
-    parser.add_argument("--grad_clip", type=float, default=1.0, help="maximum gradient magnitude")
+    parser.add_argument("--grad_clip", type=float, default=1.0, help="maximum gradient magnitude") # 梯度裁剪
     # evaluation
     parser.add_argument("--val_loss_every", type=int, default=0, help="every how mant steps to evaluate val loss?")
     parser.add_argument("--val_max_steps", type=int, default=20, help="how many batches of val to average?")
@@ -575,13 +575,27 @@ if __name__ == "__main__":
     # debugging
     parser.add_argument("--overfit_single_batch", type=int, default=1, help="overfit just one batch of data")
     # numerics
-    parser.add_argument("--tensorcores", type=int, default=0, help="use tensorcores")
+    parser.add_argument("--tensorcores", type=int, default=0, help="use tensorcores") # 硬件，加速混合精度矩阵乘法运算
     # memory management
     parser.add_argument("--device", type=str, default="", help="by default we autodetect, or set it here")
     parser.add_argument("--compile", type=int, default=0, help="torch.compile the model")
     parser.add_argument("--flash", type=int, default=0, help="use flash attention")
     parser.add_argument("--dtype", type=str, default="float32", help="float32|float16|bfloat16")
     parser.add_argument("--zero_stage", type=int, default=0, help="zero redundancy optimizer stage (0/1/2/3)")
+    '''
+    Stage 0：不使用 ZeRO
+        就是最普通的分布式数据并行，每个 GPU 保存完整副本，无分片。显存占用最大，但无额外通信。
+    Stage 1：优化器状态分片（Optimizer State Partitioning）
+        将优化器状态（如 Adam 的 exp_avg、exp_avg_sq）平均切分到所有 GPU 上。
+        每个 GPU 只负责更新自己那部分参数对应的状态，显存占用大约降为原来的 1/4（以 Adam 为例，状态+参数+梯度，状态占大头）。这一阶段对训练速度影响很小。
+    Stage 2：优化器状态 + 梯度分片（+ Gradient Partitioning）
+        在 Stage 1 的基础上，连梯度也切分。
+        每个 GPU 只保留自己负责参数的那份梯度，其他梯度被释放。显存占用进一步降低，通常可训练 数十亿参数 模型。通信量略有增加，但仍比较高效。
+    Stage 3：优化器状态 + 梯度 + 参数分片（+ Parameter Partitioning）
+        最彻底的分片方式，连模型参数本身也切分到所有 GPU。
+        每个 GPU 只存一部分参数，前向/反向传播时，需要哪块参数就从其他 GPU 实时收集。这可以训练 万亿级参数 的模型，但通信开销显著增大，通常需要配合一些重叠通信的技术。
+        
+    '''
     # python -> C bridge
     parser.add_argument("--write_tensors", type=int, default=1, help="write tensors to disk")
     args = parser.parse_args()
@@ -593,19 +607,19 @@ if __name__ == "__main__":
     assert args.model in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl", "d12", "d24", "d36", "d48"}
 
     # set up DDP (distributed data parallel). torchrun sets this env variable
-    ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+    ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run? 检查环境中是否存在RANK，一个状态值
     if ddp:
         # use of DDP atm demands CUDA, we set the device appropriately according to rank
-        assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
-        init_process_group(backend='nccl')
-        ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"  #确保有CUDA可用于DDP
+        init_process_group(backend='nccl') # 用nccl通信库初始化进程组
+        ddp_rank = int(os.environ['RANK']) # 状态值
+        ddp_local_rank = int(os.environ['LOCAL_RANK']) # 显卡的索引值
+        ddp_world_size = int(os.environ['WORLD_SIZE']) # 总进程数
         device = f'cuda:{ddp_local_rank}'
         torch.cuda.set_device(device)
-        master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
-        seed_offset = 0 # each process gets the exact same seed
-        zero_stage = args.zero_stage
+        master_process = ddp_rank == 0 # this process will do logging, checkpointing etc. 设置主进程为 0 进程
+        seed_offset = 0 # each process gets the exact same seed 设置每个进程种子一致
+        zero_stage = args.zero_stage # 设置显存优化等级
     else:
         ddp_rank = 0
         ddp_local_rank = 0
@@ -623,7 +637,7 @@ if __name__ == "__main__":
             if torch.cuda.is_available():
                 device = "cuda"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                device = "mps"
+                device = "mps" # 苹果设备
     print(f"using device: {device}")
     device_type = 'cuda' if 'cuda' in device else 'cpu'
 
@@ -634,11 +648,11 @@ if __name__ == "__main__":
     print0(f"total desired batch size: {args.total_batch_size}")
     print0(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
-    # set up a context manager following the desired dtype and device
+    # set up a context manager following the desired dtype and device 设置参数精度和设备
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[args.dtype]
     ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
-    # rng / reproducibility
+    # rng / reproducibility 设置种子
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(42)
@@ -646,19 +660,19 @@ if __name__ == "__main__":
     # set the torch precision mode to use TensorFloat32 (TF32) for matmuls
     # docs https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html
     if args.tensorcores:
-        torch.set_float32_matmul_precision('high')
+        torch.set_float32_matmul_precision('high') # 开启自动混合精度
 
-    # turn on/off flash attention
+    # turn on/off flash attention 是否开启 flash attention
     assert args.flash in {0, 1}
     FLASH = args.flash
 
-    # init (and write) the tokenizer
+    # init (and write) the tokenizer 初始化并把词库写成bin文件
     enc = tiktoken.get_encoding("gpt2")
     if master_process and args.write_tensors: # tokenizer is technically not tensors but ok
         write_tokenizer(enc, "gpt2_tokenizer.bin")
 
     # init the model, either from scratch or from OpenAI pretrained checkpoint
-    if args.model[0] == "d":
+    if args.model[0] == "d": # model参数d开头
         # from scratch (random weights)
         model_config = {
             "d12": GPTConfig(block_size=1024, vocab_size=50257, n_layer=12, n_head=12, n_embd=768),
@@ -670,16 +684,16 @@ if __name__ == "__main__":
     else:
         # load the GPT-2 model weights
         model = GPT.from_pretrained(args.model)
-    model.train()
-    model.to(device)
-    if args.compile:
+    model.train() # 设置训练模型
+    model.to(device) # 把模型加载到device上
+    if args.compile: # 是否编译
         if hasattr(config, "coordinate_descent_tuning"):
             config.coordinate_descent_tuning = True # suggested by @Chillee
         print0("compiling the model...")
         model = torch.compile(model)
 
     # -------------------------------------------------------------------------
-    # Our own version of a simple DistributedDataLoader
+    # Our own version of a simple DistributedDataLoader（暂时不看）
 
     # load tokens
     train_loader = DistributedDataLoader(args.input_bin, B, T, ddp_rank, ddp_world_size)
@@ -694,7 +708,7 @@ if __name__ == "__main__":
     if master_process and args.write_tensors and (not args.inference_only):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
-        logits, loss = model(x, y)
+        logits, loss = model(x,  y)
         loss.backward()
         # save model params, in both float32 and bfloat16
         model_to_size = {"gpt2": "124M", "gpt2-medium": "355M", "gpt2-large": "774M", "gpt2-xl": "1558M"}
@@ -709,34 +723,34 @@ if __name__ == "__main__":
         train_loader.reset()
 
     # -------------------------------------------------------------------------
-    # main training loop
+    # main training loop 主训练循环
 
-    # here we wrap model into DDP container
+    # here we wrap model into DDP container 把模型打包进DDP容器
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
     raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-    # init the optimizer
+    # init the optimizer 初始化优化器
     optimizer = raw_model.configure_optimizers(weight_decay=args.weight_decay,
                                                learning_rate=args.learning_rate, betas=(0.9, 0.95),
                                                device_type=device, zero_stage=zero_stage)
 
-    # learning rate decay scheduler (cosine with warmup)
+    # learning rate decay scheduler (cosine with warmup) # 学习率变化 it 是迭代次数
     def get_lr(it):
         min_lr = args.learning_rate * args.learning_rate_decay_frac
-        # 1) linear warmup for warmup_iters steps
+        # 1) linear warmup for warmup_iters steps 把lr从0%加载到100%
         if it < args.warmup_iters:
             return args.learning_rate * (it+1) / args.warmup_iters
-        # 2) if it > lr_decay_iters, return min learning rate
+        # 2) if it > lr_decay_iters, return min learning rate 固定为一个min-lr
         if it > args.num_iterations:
             return min_lr
-        # 3) in between, use cosine decay down to min learning rate
+        # 3) in between, use cosine decay down to min learning rate 余弦退火
         decay_ratio = (it - args.warmup_iters) / (args.num_iterations - args.warmup_iters)
         assert 0 <= decay_ratio <= 1
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
         return min_lr + coeff * (args.learning_rate - min_lr)
 
-    # create the logging directory if it does not exist
+    # create the logging directory if it does not exist 日志设置
     logfile = None
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -746,14 +760,14 @@ if __name__ == "__main__":
             pass
 
     if device == "cuda":
-        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_peak_memory_stats() # 清零，忽略之前的初始化占用
     timings = []
     norm = -1.0   # dummy value to print in inference-only mode
     for step in range(args.num_iterations + 1):
         t0 = time.time()
         last_step = (step == args.num_iterations)
 
-        # once in a while evaluate the validation dataset
+        # once in a while evaluate the validation dataset 验证
         if (args.val_loss_every > 0 \
             and (step % args.val_loss_every == 0 or last_step)) \
             and (val_loader is not None):
@@ -773,7 +787,7 @@ if __name__ == "__main__":
                 with open(logfile, "a") as f:
                     f.write("s:%d tel:%f\n" % (step, val_loss))
 
-        # once in a while perform model inference on the master process
+        # once in a while perform model inference on the master process 主进程采样
         if (args.sample_every > 0 \
             and (step % args.sample_every == 0 or last_step)) \
             and master_process:
@@ -798,8 +812,8 @@ if __name__ == "__main__":
             break
 
         # --------------- TRAINING SECTION BEGIN -----------------
-        model.train()
-        optimizer.zero_grad(set_to_none=True)
+        model.train() # 训练模式
+        optimizer.zero_grad(set_to_none=True) # 优化器 梯度归零
         # if we are trying to overfit a single batch, we reset the loader here
         if args.overfit_single_batch:
             train_loader.reset()
@@ -815,7 +829,7 @@ if __name__ == "__main__":
                 # context manager that bloats the code, so we just toggle this variable
                 model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
             # forward pass
-            with ctx:
+            with ctx: # 混合精度
                 _, loss = model(x, y, return_logits=False)
                 # we have to scale the loss to account for gradient accumulation,
                 # because the gradients just add on each successive backward().
