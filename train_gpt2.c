@@ -79,7 +79,7 @@ void encoder_backward(float* dwte, float* dwpe,
             float* dwpe_t = dwpe + t * C;
             for (int i = 0; i < C; i++) {
                 float d = dout_bt[i];
-                dwte_ix[i] += d;
+                dwte_ix[i] += d; // out_bt[i] = wte_ix[i] + wpe_t[i]; 对应这一行，只是作加法                
                 dwpe_t[i] += d;
             }
         }
@@ -164,11 +164,11 @@ void layernorm_backward(float* dinp, float* dweight, float* dbias,
             for (int i = 0; i < C; i++) {
                 float norm_bti = (inp_bt[i] - mean_bt) * rstd_bt;
                 float dnorm_i = weight[i] * dout_bt[i];
-                // gradient contribution to bias
+                // gradient contribution to bias 易得
                 dbias[i] += dout_bt[i];
-                // gradient contribution to weight
+                // gradient contribution to weight 易得
                 dweight[i] += norm_bti * dout_bt[i];
-                // gradient contribution to input
+                // gradient contribution to input 需要好好推导
                 float dval = 0.0f;
                 dval += dnorm_i; // term 1
                 dval -= dnorm_mean; // term 2
@@ -383,7 +383,7 @@ void attention_backward(float* dinp, float* dpreatt, float* datt,
                         float* dout, float* inp, float* att,
                         int B, int T, int C, int NH) {
     // inp/dinp are (B, T, 3C) Q,K,V
-    // att/datt/dpreatt are (B, NH, T, T)
+    // att/datt/dpreatt are (B, NH, T, T)  
     // dout is (B, T, C)
     int C3 = C*3;
     int hs = C / NH; // head size

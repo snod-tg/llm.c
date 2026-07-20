@@ -10,17 +10,17 @@ GPT-2 Transformer Neural Net training loop. See README.md for usage.
 #include <sys/stat.h>
 #include <sys/types.h>
 // ----------- CPU utilities -----------
-// defines: fopenCheck, freadCheck, fcloseCheck, fseekCheck, mallocCheck
-// defines: create_dir_if_not_exists, find_max_step, ends_with_bin
+// defines: fopenCheck, freadCheck, fcloseCheck, fseekCheck, mallocCheck 文件打开，文件读取，文件关闭，文件查找定位，内存分配
+// defines: create_dir_if_not_exists, find_max_step, ends_with_bin 如果文件不存在则创建文件 find-max-step，ends-with-bin
 #include "llmc/utils.h"
-// defines: tokenizer_init, tokenizer_decode, tokenizer_free
+// defines: tokenizer_init, tokenizer_decode, tokenizer_free 分词器初始化，分词器解码，分词器释放
 #include "llmc/tokenizer.h"
-// defines: dataloader_init, dataloader_reset, dataloader_next_batch, dataloader_free
-// defines: evalloader_init, evalloader_reset, evalloader_next_batch, evalloader_free
+// defines: dataloader_init, dataloader_reset, dataloader_next_batch, dataloader_free 数据加载初始，重置，下一批，释放
+// defines: evalloader_init, evalloader_reset, evalloader_next_batch, evalloader_free 评估数据加载初始，重置，下一批，释放
 #include "llmc/dataloader.h"
-// defines: manual_seed, normal_ (same as torch.manual_seed and torch.normal)
+// defines: manual_seed, normal_ (same as torch.manual_seed and torch.normal) 随机数种子
 #include "llmc/rand.h"
-// defines: lr_scheduler_init, get_learning_rate
+// defines: lr_scheduler_init, get_learning_rate 学习率调度， 获取学习率
 #include "llmc/schedulers.h"
 // defines: sample_softmax, random_f32
 #include "llmc/sampler.h"
