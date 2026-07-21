@@ -22,22 +22,22 @@ GPT-2 Transformer Neural Net training loop. See README.md for usage.
 #include "llmc/rand.h"
 // defines: lr_scheduler_init, get_learning_rate 学习率调度， 获取学习率
 #include "llmc/schedulers.h"
-// defines: sample_softmax, random_f32
+// defines: sample_softmax, random_f32 采样（为什么带一个softmax） 32位浮点
 #include "llmc/sampler.h"
-// defines: logger_init, logger_log_eval, logger_log_val, logger_log_train
+// defines: logger_init, logger_log_eval, logger_log_val, logger_log_train 日志初始化，日志评估，日志验证，日志训练（这3者有什么区别
 #include "llmc/logger.h"
-// defines: get_flops_promised
+// defines: get_flops_promised 获得期望的 每秒浮点计算
 #include "llmc/mfu.h"
-// defines: OutlierDetector, init_detector, update_detector
+// defines: OutlierDetector, init_detector, update_detector 这3个东西不太清楚
 #include "llmc/outlier_detector.h"
 // ----------- GPU utilities -----------
 // defines:
-// WARP_SIZE, MAX_1024_THREADS_BLOCKS, CEIL_DIV, cudaCheck, PRECISION_MODE
-// NVTX_RANGE_FN
+// WARP_SIZE, MAX_1024_THREADS_BLOCKS, CEIL_DIV, cudaCheck, PRECISION_MODE 线程束大小，每个block最大thread数，整数除法向上取整，cuda检查，精度模式
+// NVTX_RANGE_FN 用于性能分析的宏
 #include "llmc/cuda_common.h"
 // defines:
 // Packed128, f128, x128
-// warpReduceSum, warpReduceMax, blockReduce, copy_and_cast_kernel, cudaMallocConditionallyManaged
+// warpReduceSum, warpReduceMax, blockReduce, copy_and_cast_kernel, cudaMallocConditionallyManaged 线程束规约和，线程束规约最大值，线程快规约，复制和转换内核，cuda内存分配
 #include "llmc/cuda_utils.cuh"
 // defines: CUBLAS_LOWP, cublasCheck, cublaslt_workspace_size, cublaslt_workspace
 // defines: cublas_compute, cublaslt_handle, cublas_handle
@@ -85,12 +85,12 @@ constexpr const size_t IO_BUF_SIZE = 32 * 1024 * 1024;
 // GPT-2 model definition
 
 typedef struct {
-    int max_seq_len; // max sequence length, e.g. 1024
-    int vocab_size; // vocab size, e.g. 50257
-    int padded_vocab_size; // padded to e.g. %128==0, 50304
-    int num_layers; // number of layers, e.g. 12
-    int num_heads; // number of heads in attention, e.g. 12
-    int channels; // number of channels, e.g. 768
+    int max_seq_len; // max sequence length, e.g. 1024 最大序列长度
+    int vocab_size; // vocab size, e.g. 50257 词表大小
+    int padded_vocab_size; // padded to e.g. %128==0, 50304 填充词表大小
+    int num_layers; // number of layers, e.g. 12 模型层数
+    int num_heads; // number of heads in attention, e.g. 12 注意力头数
+    int channels; // number of channels, e.g. 768 通道数
 } GPT2Config;
 
 // the parameters of the model
@@ -98,7 +98,7 @@ constexpr const int NUM_PARAMETER_TENSORS = 16;
 typedef struct {
     floatX* wte; // (V, C)
     floatX* wpe; // (maxT, C)
-    floatX* ln1w; // (L, C)
+    floatX* ln1w; // (L, C) L = num_layers
     floatX* ln1b; // (L, C)
     floatX* qkvw; // (L, 3*C, C)
     floatX* qkvb; // (L, 3*C)
