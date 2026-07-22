@@ -39,11 +39,11 @@ GPT-2 Transformer Neural Net training loop. See README.md for usage.
 // Packed128, f128, x128
 // warpReduceSum, warpReduceMax, blockReduce, copy_and_cast_kernel, cudaMallocConditionallyManaged 线程束规约和，线程束规约最大值，线程快规约，复制和转换内核，cuda内存分配
 #include "llmc/cuda_utils.cuh"
-// defines: CUBLAS_LOWP, cublasCheck, cublaslt_workspace_size, cublaslt_workspace
+// defines: CUBLAS_LOWP, cublasCheck, cublaslt_workspace_size, cublaslt_workspace cublas相关工具
 // defines: cublas_compute, cublaslt_handle, cublas_handle
 #include "llmc/cublas_common.h"
 // ----------- Layer implementations in CUDA -----------
-// defines: encoder_forward, encoder_backward
+// defines: encoder_forward, encoder_backward 编码向前，向后算子
 #include "llmc/encoder.cuh"
 // defines: layernorm_forward, residual_forward, fused_residual_forward5, layernorm_backward
 #include "llmc/layernorm.cuh"
@@ -91,9 +91,9 @@ typedef struct {
     int num_layers; // number of layers, e.g. 12 模型层数
     int num_heads; // number of heads in attention, e.g. 12 注意力头数
     int channels; // number of channels, e.g. 768 通道数
-} GPT2Config;
+} GPT2Config; // 模型注册
 
-// the parameters of the model
+// the parameters of the model 模型参数，用指针代表位置
 constexpr const int NUM_PARAMETER_TENSORS = 16;
 typedef struct {
     floatX* wte; // (V, C)
@@ -115,6 +115,7 @@ typedef struct {
 } ParameterTensors;
 static_assert(sizeof(ParameterTensors) == NUM_PARAMETER_TENSORS * sizeof(void*), "Inconsistent sizes!");
 
+// 计算放下所有参数需要的内存大小
 void fill_in_parameter_sizes(size_t* param_sizes, size_t* param_sizeof, GPT2Config config) {
     size_t Vp = config.padded_vocab_size;
     size_t C = config.channels;
@@ -143,16 +144,16 @@ void fill_in_parameter_sizes(size_t* param_sizes, size_t* param_sizeof, GPT2Conf
     }
 }
 
-// allocate memory for the parameters and point the individual tensors to the right places
+// allocate memory for the parameters and point the individual tensors to the right places 给参数分配内存，指针指向正确的tensor位置
 void* malloc_and_point_parameters(ParameterTensors* params, size_t* param_elements, size_t *param_sizeof) {
-    // calculate the total number of parameters and bytes across all tensors
+    // calculate the total number of parameters and bytes across all tensors 计算总byte数
     size_t num_parameters_bytes = 0;
     for (int i = 0; i < NUM_PARAMETER_TENSORS; i++) {
         num_parameters_bytes += param_elements[i] * param_sizeof[i];
     }
-    // malloc all parameters all at once on the device
-    void* params_memory;
-    cudaCheck(cudaMalloc((void**)&params_memory, num_parameters_bytes));
+    // malloc all parameters all at once on the device 在设备上分配内存
+    void* params_memory; // 创建指针
+    cudaCheck(cudaMalloc((void**)&params_memory, num_parameters_bytes)); // 分配内存并用指针指向
     // assign all the tensors their place in the array
     floatX** ptrs[] = {
         &params->wte, &params->wpe, &params->ln1w, &params->ln1b, &params->qkvw, &params->qkvb,
@@ -204,7 +205,7 @@ typedef struct {
     // some additional scratch buffers
     floatX* scratch_bt4c;   // (B, T, 4*C)
     floatX* scratch_btc;    // (B, T, C)
-} ActivationTensors;
+} ActivationTensors; 
 
 
 struct TensorSpec {
@@ -253,6 +254,7 @@ void fill_in_activation_sizes(const ActivationTensors* data, TensorSpec (&tensor
     tensors[20] = TENSOR_SPEC(data->scratch_btc, B * T * C);
 }
 
+// 给激活状态分配内存和对齐指针
 void* malloc_and_point_activations(TensorSpec (&tensors)[NUM_ACTIVATION_TENSORS]) {
     size_t bytes = 0;
     for (size_t i = 0; i < NUM_ACTIVATION_TENSORS; i++) {
@@ -267,8 +269,8 @@ void* malloc_and_point_activations(TensorSpec (&tensors)[NUM_ACTIVATION_TENSORS]
     // cudaMalloc does not guarantee initial memory values so we memset the allocation here
     // this matters because e.g. non-cuDNN attention assumes the attention buffer is zeroed
     // todo - up to ~100ms on slow GPUs, could theoretically be more selective, but this is safer
-    cudaCheck(cudaMemset(acts_memory, 0, bytes));
-
+    cudaCheck(cudaMemset(acts_memory, 0, bytes));  // 初始化为0
+                                                                                                                                                                                                                                                                                                                                                                                              
     char* acts_memory_iterator = (char*)acts_memory;
     for (size_t i = 0; i < NUM_ACTIVATION_TENSORS; i++) {
         // extra protection so we don't accidentally use an empty buffer
@@ -321,6 +323,7 @@ typedef struct {
     int4* bucket_info;     // encoder_backward, B*T*num_c_groups (int4) - size for worst case
 } GPT2;
 
+// 模型初始化
 void gpt2_init_common(GPT2 *model) {
     // common inits outside of the model weights
     // memory lazily initialized in forward()
@@ -350,6 +353,7 @@ void gpt2_init_common(GPT2 *model) {
     model->gelu_fusion = 0; //deviceProp.major >= 9 ? 2 : 0; // default: off for now (default must match main())
 }
 
+// 为参数分配内存
 void gpt2_allocate_weights(GPT2 *model) {
     // fill in all the parameter tensor dimensions and types
     fill_in_parameter_sizes(model->param_elements, model->param_sizeof, model->config);
