@@ -22,11 +22,11 @@ GPT-2 Transformer Neural Net training loop. See README.md for usage.
 #include "llmc/rand.h"
 // defines: lr_scheduler_init, get_learning_rate 学习率调度， 获取学习率
 #include "llmc/schedulers.h"
-// defines: sample_softmax, random_f32 采样（为什么带一个softmax） 32位浮点
+// defines: sample_softmax, random_f32 softmax和采样， 32位浮点
 #include "llmc/sampler.h"
 // defines: logger_init, logger_log_eval, logger_log_val, logger_log_train 日志初始化，日志评估，日志验证，日志训练（这3者有什么区别
 #include "llmc/logger.h"
-// defines: get_flops_promised 获得期望的 每秒浮点计算
+// defines: get_flops_promised 查询/估算GPU在指定精度下的理论峰值TFLOPS
 #include "llmc/mfu.h"
 // defines: OutlierDetector, init_detector, update_detector 这3个东西不太清楚
 #include "llmc/outlier_detector.h"
@@ -91,7 +91,7 @@ typedef struct {
     int num_layers; // number of layers, e.g. 12 模型层数
     int num_heads; // number of heads in attention, e.g. 12 注意力头数
     int channels; // number of channels, e.g. 768 通道数
-} GPT2Config; // 模型注册
+} GPT2Config; // 模型配置
 
 // the parameters of the model 模型参数，用指针代表位置
 constexpr const int NUM_PARAMETER_TENSORS = 16;
@@ -1419,9 +1419,9 @@ void error_usage() {
 }
 
 // ----------------------------------------------------------------------------
-// main training loop
+// main training loop 主要训练循环
 int main(int argc, char *argv[]) {
-    // read in the (optional) command line arguments
+    // read in the (optional) command line arguments 读取可选指令参数
     const char* train_data_pattern = "dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
     const char* val_data_pattern = "dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
     const char* load_filename = "gpt2_124M_bf16.bin"; // bf16 weights of the model

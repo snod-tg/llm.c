@@ -45,8 +45,8 @@ void encoder_forward(float* out,
     // wpe is (maxT,C) of position embeddings, short for "weight positional embedding"
     // 每个batch块，举例第0块batch， b = 0
     // 每个序列的字符，举例第0块batch的 t = 0的token
-    // out_bt 对应的输出的坐标：out首地址 + b * T（标准序度）* C（C的长度表示对应tokenizer中的表示坐标维度）+ t * C；
-    // ix 是对应token在inp（输入）的下标
+    // out_bt 对应的输出的坐标：out首地址 + b * T（标准序度）* C（C的长度表示隐藏维度，通道数）+ t * C；
+    // ix 是对应token在ID
     // wte 是 wte首地址 + ix * C；
     // wpe_t 是wpe首地址 + t * C；使用t是因为只要知道该token在这段序列中的位置关系。
     // 最后输出是对应x = tok_emb + pos_emb
@@ -79,7 +79,7 @@ void encoder_backward(float* dwte, float* dwpe,
             float* dwpe_t = dwpe + t * C;
             for (int i = 0; i < C; i++) {
                 float d = dout_bt[i];
-                dwte_ix[i] += d; // out_bt[i] = wte_ix[i] + wpe_t[i]; 对应这一行，只是作加法                
+                dwte_ix[i] += d; // out_bt[i] = wte_ix[i] + wpe_t[i]; 对应这一行，只是作加法，用+= 是因为相同的token可能出现多次，梯度累加                
                 dwpe_t[i] += d;
             }
         }
@@ -875,25 +875,25 @@ void gpt2_forward(GPT2 *model, int* inputs, int* targets, size_t B, size_t T) {
         // get the pointers of the weights for this layer
         float* l_ln1w = params.ln1w + l * C;                    // norm1 weight （1，C）
         float* l_ln1b = params.ln1b + l * C;                    // norm1 bias   （1，C）
-        float* l_qkvw = params.qkvw + l * 3*C * C;              // qkv weight 每个 （3C，C）
-        float* l_qkvb = params.qkvb + l * 3*C;                  // qkv bias       （3，C）
+        float* l_qkvw = params.qkvw + l * 3*C * C;              // qkv weight 每个 （C，3C）
+        float* l_qkvb = params.qkvb + l * 3*C;                  // qkv bias       （3C）
         float* l_attprojw = params.attprojw + l * C * C;        // output1 weight  （C，C）
         float* l_attprojb = params.attprojb + l * C;            // output1 bias    （1，C）
         float* l_ln2w = params.ln2w + l * C;                    // norm2 weight    （1，C）   
         float* l_ln2b = params.ln2b + l * C;                    // norm2 bias      （1，C）
         float* l_fcw = params.fcw + l * 4*C * C;                // 线性变化 先升维，再降维 FNN weight （C，4C）
-        float* l_fcb = params.fcb + l * 4*C;                    // FNN bias   （1，4C）                      
-        float* l_fcprojw = params.fcprojw + l * C * 4*C;        // FNN weight （4C，C）
+        float* l_fcb = params.fcb + l * 4*C;                    // FNN bias   （4C）                      
+        float* l_fcprojw = params.fcprojw + l * C * 4*C;        // FNN weight （C，4C）
         float* l_fcprojb = params.fcprojb + l * C;              // FNN bias    (1, C)
 
         // get the pointers of the activations for this layer
         float* l_ln1 = acts.ln1 + l * B * T * C;                // 归一化 输出
         float* l_ln1_mean = acts.ln1_mean + l * B * T;          // 归一化 均值
-        float* l_ln1_rstd = acts.ln1_rstd + l * B * T;          // 归一化 标准差
+        float* l_ln1_rstd = acts.ln1_rstd + l * B * T;          // 归一化 标准差的倒数
         float* l_qkv = acts.qkv + l * B * T * 3*C;              // kqv线性映射输出
         float* l_atty = acts.atty + l * B * T * C;              // attn 输出
-        float* l_preatt = acts.preatt + l * B * NH * T * T;     // 保存上一个attn
-        float* l_att = acts.att + l * B * NH * T * T;           // 当前attn
+        float* l_preatt = acts.preatt + l * B * NH * T * T;     // 保存 softmax之前的缩放QK分数
+        float* l_att = acts.att + l * B * NH * T * T;           // softmax 之后的注意力概率
         float* l_attproj = acts.attproj + l * B * T * C;        // attn后的线性变换输出
         float* l_residual2 = acts.residual2 + l * B * T * C;    // 残差输出
         float* l_ln2 = acts.ln2 + l * B * T * C;                // 归一化输出

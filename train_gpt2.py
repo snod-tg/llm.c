@@ -70,20 +70,20 @@ class CausalSelfAttention(nn.Module):
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         qkv = self.c_attn(x)                                                                                                 # （(B, T, C) @ (C, 3C) -> (B, T, 3C)
         q, k, v = qkv.split(self.n_embd, dim=2)                                                                              #  沿着第2维分割，step为C （B， T， C） (B, T, C) (B, T, C)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)                                     #  (B, T, C/h, h)  -> (B, C/h, T, h)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)                                     #  (B, T, C/h, h)  -> (B, C/h, T, h)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)                                     #  (B, T, C/h, h)  -> (B, C/h, T, h)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)                                     #  (B, T, h, C/h)  -> (B, h, T, C/h)  
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)                                     #  (B, T, h, C/h)  -> (B, h, T, C/h)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)                                     #  (B, T, h, C/h)  -> (B, h, T, C/h)
         if FLASH:
             # flashattention
             y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         else:
             # manual implementation of attention
             # this materializes the large (T,T) matrix for all the queries and keys
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))                                                 # (B, C/h, T, h) @ (B, C/h, h, T) = (B, C/h, T, T) / 缩放
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))                                                 # (B, h, T, C/h) @ (B, h, C/h, T) = (B, h, T, T) / 缩放
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))                                                 # 掩码
             att = F.softmax(att, dim=-1)                                                                                    # 求概率，沿最后一维
-            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)                                                  # (B, C/h, T, T) @ (B, C/h, T, h) -> (B, C/h, T, h)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side                        # 复原 (B, C/h, T, h) -> (B, T, C/h, h) -> (B, T, C)
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)                                                  # (B, h, T, T) @ (B, h, T, C/h) -> (B, h, T, C/h)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side                        # 复原 (B, h, T, C/h) -> (B, T, h, C/h) -> (B, T, C)
         # output projection
         y = self.c_proj(y)                                                                                                  # 投影 (B, T, C) @ (C, C) -> (B, T, C)
         return y
@@ -136,7 +136,7 @@ class GPT(nn.Module):
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),                                                           # (V, C)
-            wpe = nn.Embedding(config.block_size, config.n_embd),                                                           # (b, C)
+            wpe = nn.Embedding(config.block_size, config.n_embd),                                                           # (block_size, C)
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd),
         ))
@@ -286,9 +286,9 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size 如果序列内容太长，我们必须把它切为 block size长度
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence 模型向前推理，获得下一个输出的index
-            logits, _ = self(idx_cond)  # 输出是预测结果和 (B, T, V)
+            logits, _ = self(idx_cond)  # 输出是预测结果和 (B, 1, V)
             # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature  # (B, T, V) -> (B, 1, V), 其中V为词表数，，每个值代表对应token的概率， 用temperature缩放可以增大高分词概率或减少
+            logits = logits[:, -1, :] / temperature  # (B, 1, V) -> (B, V), 其中V为词表数，，每个值代表对应未归一化分数， 用temperature缩放可以增大高分词概率或减少
             # optionally crop the logits to only the top k options
             if top_k is not None:  # 选择top k 个候选
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1))) 
@@ -405,7 +405,7 @@ def write_tensors(model_tensors, L, file, dtype):
     write_fun = write_fp32 if dtype == "float32" else write_bf16
     write_fun(model_tensors["transformer.wte.weight"], file) # (V, C)
     write_fun(model_tensors["transformer.wpe.weight"], file) # (T, C)
-    for i in range(L): # (L, C) 写入归一层权重 L = C * layer_num
+    for i in range(L): # (L, C) 写入归一层权重 L = layer_num
         write_fun(model_tensors[f"transformer.h.{i}.ln_1.weight"], file)
     for i in range(L): # (L, C) 写入归一层偏置
         write_fun(model_tensors[f"transformer.h.{i}.ln_1.bias"], file)
@@ -423,7 +423,7 @@ def write_tensors(model_tensors, L, file, dtype):
         write_fun(model_tensors[f"transformer.h.{i}.ln_2.bias"], file)
     for i in range(L): # (L, 4C, C) 写入FFN1权重
         write_fun(model_tensors[f"transformer.h.{i}.mlp.c_fc.weight"], file)
-    for i in range(L): # (L, 4C) 写入FFN1权重
+    for i in range(L): # (L, 4C) 写入FFN1偏置
         write_fun(model_tensors[f"transformer.h.{i}.mlp.c_fc.bias"], file)
     for i in range(L): # (L, C, 4C) 写入FFN2权重
         write_fun(model_tensors[f"transformer.h.{i}.mlp.c_proj.weight"], file)
@@ -441,7 +441,7 @@ def pad_vocab(tensor, multiple=128, value=0):
     friendlier multiple, e.g. 50,304 if multiple=128 when we
     export the weights into C land. This is a NOOP algorithmically
     and is only done to make the tensor operations more efficient.
-    填充vocab，让其变为2的倍数
+    填充vocab，让其变为multiple的倍数
     """
     assert tensor.ndim == 2
     V, C = tensor.shape
@@ -582,20 +582,7 @@ if __name__ == "__main__":
     parser.add_argument("--flash", type=int, default=0, help="use flash attention")
     parser.add_argument("--dtype", type=str, default="float32", help="float32|float16|bfloat16")
     parser.add_argument("--zero_stage", type=int, default=0, help="zero redundancy optimizer stage (0/1/2/3)")
-    '''
-    Stage 0：不使用 ZeRO
-        就是最普通的分布式数据并行，每个 GPU 保存完整副本，无分片。显存占用最大，但无额外通信。
-    Stage 1：优化器状态分片（Optimizer State Partitioning）
-        将优化器状态（如 Adam 的 exp_avg、exp_avg_sq）平均切分到所有 GPU 上。
-        每个 GPU 只负责更新自己那部分参数对应的状态，显存占用大约降为原来的 1/4（以 Adam 为例，状态+参数+梯度，状态占大头）。这一阶段对训练速度影响很小。
-    Stage 2：优化器状态 + 梯度分片（+ Gradient Partitioning）
-        在 Stage 1 的基础上，连梯度也切分。
-        每个 GPU 只保留自己负责参数的那份梯度，其他梯度被释放。显存占用进一步降低，通常可训练 数十亿参数 模型。通信量略有增加，但仍比较高效。
-    Stage 3：优化器状态 + 梯度 + 参数分片（+ Parameter Partitioning）
-        最彻底的分片方式，连模型参数本身也切分到所有 GPU。
-        每个 GPU 只存一部分参数，前向/反向传播时，需要哪块参数就从其他 GPU 实时收集。这可以训练 万亿级参数 的模型，但通信开销显著增大，通常需要配合一些重叠通信的技术。
-        
-    '''
+
     # python -> C bridge
     parser.add_argument("--write_tensors", type=int, default=1, help="write tensors to disk")
     args = parser.parse_args()
@@ -660,7 +647,7 @@ if __name__ == "__main__":
     # set the torch precision mode to use TensorFloat32 (TF32) for matmuls
     # docs https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html
     if args.tensorcores:
-        torch.set_float32_matmul_precision('high') # 开启自动混合精度
+        torch.set_float32_matmul_precision('high') # 允许float32矩阵乘法在支持NVIDIA GPU上使用TF32 Tensor Core
 
     # turn on/off flash attention 是否开启 flash attention
     assert args.flash in {0, 1}
